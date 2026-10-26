@@ -89,7 +89,8 @@ pub struct Cli {
 
     /// Spoken countdown (at fixed intervals with per-second annunciations
     /// starting at --critical; requires `espeak` on Linux or `say` on macOS;
-    /// choose VOICE from `say -v '?'` or `espeak --voices`)
+    /// e.g. `-v en-us` or `-v de` (espeak, list with `espeak --voices`),
+    /// `-v Alex` or `-v Samantha` (say, list with `say -v '?'`)
     #[arg(short = 'v', long, value_name = "VOICE")]
     pub voice: Option<String>,
 
@@ -242,6 +243,12 @@ fn main() {
             exit(2);
         }
     };
+    if let Some(voice) = &cli.voice {
+        if let Err(e) = app::check_voice(voice) {
+            eprintln!("Error: {}", e);
+            exit(2);
+        }
+    }
 
     match cli.timespec.clone() {
         Some(timespec) => {
@@ -256,6 +263,9 @@ fn main() {
             let result = app::countdown(&mut terminal, &cli, &font, &timespec, parsed, &time_format);
             ratatui::restore();
             finish(&cli);
+            if let Some(voice_error) = app::VOICE_ERROR.lock().unwrap().take() {
+                eprintln!("Error: {}", voice_error);
+            }
             match result {
                 Ok(code) => exit(code),
                 Err(e) => {

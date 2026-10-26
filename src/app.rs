@@ -3,6 +3,7 @@
 // event::poll provides the same timed-wait semantics inline.
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use chrono::{Duration, Local, NaiveDateTime, Timelike};
@@ -112,18 +113,71 @@ fn spawn_shell(cmd_template: &str, seconds: i64, annunciation: &str) {
         .spawn();
 }
 
+pub static VOICE_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn record_voice_error(msg: String) {
+    let mut slot = VOICE_ERROR.lock().unwrap();
+    if slot.is_none() {
+        *slot = Some(msg);
+    }
+}
+
 fn spawn_voice(voice_cmd: &str, voice: &str, annunciation: &str) {
-    let _ = Command::new(voice_cmd)
+    let spawned = Command::new(voice_cmd)
         .args(["-v", voice, annunciation])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn();
+    match spawned {
+        Ok(child) => {
+            let cmd = voice_cmd.to_string();
+            std::thread::spawn(move || {
+                if let Ok(output) = child.wait_with_output() {
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        record_voice_error(format!(
+                            "voice command failed: {}: {}",
+                            cmd,
+                            stderr.trim()
+                        ));
+                    }
+                }
+            });
+        }
+        Err(e) => record_voice_error(format!("failed to run {}: {}", voice_cmd, e)),
+    }
 }
 
 fn find_voice_cmd() -> Option<&'static str> {
     ["/usr/bin/say", "/usr/bin/espeak", "/usr/bin/espeak-ng"]
         .into_iter()
         .find(|p| std::path::Path::new(p).exists())
+}
+
+/// Test-run the speech command once with empty text so a missing binary or
+/// bad voice name fails loudly before the TUI starts.
+pub fn check_voice(voice: &str) -> Result<(), String> {
+    let cmd = find_voice_cmd()
+        .ok_or_else(|| "--voice requires espeak or say, but neither was found".to_string())?;
+    let mut test = Command::new(cmd);
+    if cmd.contains("espeak") {
+        test.arg("-q");
+    }
+    let output = test
+        .args(["-v", voice, ""])
+        .stdout(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to run {}: {}", cmd, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "{} rejected voice '{}': {}",
+            cmd,
+            voice,
+            stderr.trim()
+        ));
+    }
+    Ok(())
 }
 
 fn render_title(cli: &Cli, font: &Font) -> Option<String> {
